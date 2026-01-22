@@ -13,7 +13,7 @@ from google.auth.transport.requests import Request
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
 # --- 1. PAGE CONFIGURATION ---
-st.set_page_config(page_title="Y4J Volunteer Portal", page_icon="🏗️", layout="centered")
+st.set_page_config(page_title="Y4J Youth Profile Builder", page_icon="🏗️", layout="centered")
 
 # --- 2. CONFIGURATION & CONSTANTS ---
 # Folder where uploads will go (The 2TB Drive Folder)
@@ -131,7 +131,7 @@ if "credentials" not in st.session_state:
 
     # B. Show Login Button (If no code and no credentials)
     else:
-        st.title("🏗️ Y4J Volunteer Portal")
+        st.title("🏗️ Y4J Youth Profile Builder")
         st.info("Please log in to access the system.")
         
         flow = get_google_flow()
@@ -169,78 +169,3 @@ try:
         st.sidebar.image(user_pic, width=50)
     st.sidebar.write(f"**{user_name}**")
     st.sidebar.caption(f"{user_email}")
-    
-except Exception as e:
-    st.sidebar.warning("Logged in, but couldn't fetch profile info.")
-    # Fallback values if API fails
-    user_email = "Unknown User"
-    user_id = "N/A"
-    user_name = "Volunteer"
-
-# Logout Button
-if st.sidebar.button("Logout"):
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    st.rerun()
-
-# --- MAIN FORM UI ---
-st.title("🏗️ Y4J Candidate Info Builder")
-st.write(f"Welcome, **{user_name}**!")
-
-with st.form("entry_form", clear_on_submit=True):
-    st.subheader("New Contribution")
-    
-    # 1. FILE ENTRY DATA (Category Removed)
-    info_title = st.text_input("Candidate/Info Title")
-    entry_date = st.date_input("Document Date", date.today())
-    details = st.text_area("Details/Description")
-    
-    st.divider()
-    
-    # 2. FILE BROWSE FEATURE
-    uploaded_file = st.file_uploader("Upload PDF, Image, or Doc", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "txt"])
-    
-    # Button is inside the form
-    submit = st.form_submit_button("🚀 Upload to Production Drive", use_container_width=True)
-
-# --- 6. SUBMISSION LOGIC ---
-if submit:
-    if not info_title:
-        st.error("Error: Please provide a title.")
-    else:
-        with st.spinner("Pushing to 2 TB Storage..."):
-            success = True
-            
-            # A. Upload the Text Details
-            # Removed category from filename. Just using Date + Title.
-            text_filename = f"{entry_date}_{info_title}_notes.txt"
-            
-            full_content = (
-                f"TITLE: {info_title}\n"
-                f"DATE: {entry_date}\n"
-                f"AUTHOR: {user_email} (ID: {user_id})\n"
-                f"----------------------------------------\n"
-                f"{details}"
-            )
-            
-            res_text = upload_to_drive(text_filename, full_content.encode('utf-8'), 'text/plain')
-            if not res_text: success = False
-
-            # B. UPLOAD LOGIC
-            if uploaded_file:
-                # Use the user's title for the file name as well (plus extension)
-                # We keep the email prefix to avoid overwrites if two users pick the same title
-                file_ext = os.path.splitext(uploaded_file.name)[1]
-                file_name = f"{entry_date}_{info_title}_{user_email}{file_ext}"
-                
-                res_file = upload_to_drive(file_name, uploaded_file.getvalue(), uploaded_file.type)
-                
-                if not res_file: 
-                    success = False
-                    st.error("File upload failed.")
-                else:
-                    st.toast(f"File uploaded: {file_name}")
-
-            if success:
-                st.success(f"Successfully uploaded '{info_title}' records!")
-                st.balloons()
