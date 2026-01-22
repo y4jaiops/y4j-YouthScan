@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
-import time  # <--- FIXED: Added to handle rate limiting
+import time
 from logic_gemini import parse_document_dynamic
-from logic_sheets import append_to_sheet
+# Updated import to include the batch function
+from logic_sheets import append_to_sheet, append_batch_to_sheet
 from logic_drive import get_file_from_link
 
 st.set_page_config(page_title="Y4J YouthScan App", page_icon="🇮🇳", layout="wide")
@@ -12,7 +13,6 @@ st.title("🇮🇳 Youth4Jobs Smart Scanner")
 with st.sidebar:
     st.header("Configuration")
     
-    # --- FIXED: Added warning for Excel files ---
     sheet_url = st.text_input("Paste Google Sheet URL here:")
     if sheet_url and "xlsx" in sheet_url:
         st.error("⚠️ You pasted a link to an Excel file (.xlsx). Please convert it to a Google Sheet first (File > Save as Google Sheets).")
@@ -21,7 +21,6 @@ with st.sidebar:
     cols_input = st.text_area("Columns to Extract", value=default_cols, height=150)
     target_columns = [x.strip() for x in cols_input.split(",") if x.strip()]
     
-    # Display the bot email so users know who to share with
     if "gcp_service_account" in st.secrets:
         bot_email = st.secrets["gcp_service_account"]["client_email"]
         st.info(f"🤖 **Bot Email:**\n`{bot_email}`\n\n(Share Drive files with this email!)")
@@ -53,7 +52,6 @@ with tab3:
     if drive_link:
         if st.button("📥 Fetch from Drive"):
             with st.spinner("Downloading from Drive..."):
-                # Ensure logic_drive.py has the fix discussed previously for ID extraction
                 file_bytes, detected_mime, error = get_file_from_link(drive_link)
                 if error:
                     st.error(error)
@@ -69,7 +67,6 @@ if image_data:
     
     with col1:
         st.markdown(f"**Loaded Document ({mime_type})**")
-        # Only show preview if it's an image (Streamlit can't easily preview PDF bytes yet)
         if "image" in mime_type:
             st.image(image_data, use_column_width=True)
         else:
@@ -80,7 +77,6 @@ if image_data:
                 st.warning("Please enter a Google Sheet URL first.")
             else:
                 with st.spinner("Gemini is analyzing..."):
-                    # Pass the dynamic mime type!
                     result = parse_document_dynamic(image_data, target_columns, mime_type)
                     
                     if result and isinstance(result, list) and "error" in result[0]:
@@ -97,29 +93,16 @@ if image_data:
                 if not sheet_url:
                      st.error("Please provide a Google Sheet URL in the sidebar.")
                 else:
-                    # --- FIXED: Added Progress Bar and Sleep to prevent API 429 Errors ---
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    success_count = 0
-                    total_rows = len(edited_df)
-                    
-                    for index, row in edited_df.iterrows():
-                        status_text.text(f"Saving row {index + 1} of {total_rows}...")
+                    with st.spinner("Saving all rows at once..."):
+                        # --- NEW BATCH LOGIC (Fixes 429 Quota Error) ---
+                        # Convert DataFrame to a list of dictionaries
+                        data_to_save = edited_df.to_dict('records')
                         
-                        if append_to_sheet(sheet_url, row.to_dict()):
-                            success_count += 1
+                        # Call the batch function instead of looping
+                        success = append_batch_to_sheet(sheet_url, data_to_save)
                         
-                        # Update progress bar
-                        progress_bar.progress((index + 1) / total_rows)
-                        
-                        # 🛑 CRITICAL FIX: Sleep for 2 seconds to avoid "Quota Exceeded" errors
-                        time.sleep(2)
-                    
-                    status_text.empty()
-                    
-                    if success_count == total_rows:
-                        st.success(f"✅ Saved {success_count} candidates!")
-                        st.balloons()
-                    else:
-                        st.warning(f"Saved {success_count} out of {total_rows} candidates. Check permissions.")
+                        if success:
+                            st.success(f"✅ Successfully saved {len(data_to_save)} candidates!")
+                            st.balloons()
+                        else:
+                            st.error("Failed to save data. Check the logs.")
