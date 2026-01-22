@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time  # <--- FIXED: Added to handle rate limiting
 from logic_gemini import parse_document_dynamic
 from logic_sheets import append_to_sheet
 from logic_drive import get_file_from_link
@@ -7,14 +8,16 @@ from logic_drive import get_file_from_link
 st.set_page_config(page_title="Y4J YouthScan App", page_icon="🇮🇳", layout="wide")
 st.title("🇮🇳 Youth4Jobs Smart Scanner")
 
-#First Name,	Last Name,	ID Type,	ID Number,	Email,	PhoneNumber,	DateOfBirth,	Gender,	DisabilityType,	Qualification,	State
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("Configuration")
+    
+    # --- FIXED: Added warning for Excel files ---
     sheet_url = st.text_input("Paste Google Sheet URL here:")
-#default_cols = "Candidate Name, Phone Number, Disability Type, Education, Village/City, Skills"
-    default_cols = "First Name,	Last Name,	ID Type,	ID Number,	Email,	PhoneNumber,	DateOfBirth,	Gender,	DisabilityType,	Qualification,	State"
+    if sheet_url and "xlsx" in sheet_url:
+        st.error("⚠️ You pasted a link to an Excel file (.xlsx). Please convert it to a Google Sheet first (File > Save as Google Sheets).")
 
+    default_cols = "First Name, Last Name, ID Type, ID Number, Email, PhoneNumber, DateOfBirth, Gender, DisabilityType, Qualification, State"
     cols_input = st.text_area("Columns to Extract", value=default_cols, height=150)
     target_columns = [x.strip() for x in cols_input.split(",") if x.strip()]
     
@@ -50,6 +53,7 @@ with tab3:
     if drive_link:
         if st.button("📥 Fetch from Drive"):
             with st.spinner("Downloading from Drive..."):
+                # Ensure logic_drive.py has the fix discussed previously for ID extraction
                 file_bytes, detected_mime, error = get_file_from_link(drive_link)
                 if error:
                     st.error(error)
@@ -79,7 +83,7 @@ if image_data:
                     # Pass the dynamic mime type!
                     result = parse_document_dynamic(image_data, target_columns, mime_type)
                     
-                    if result and "error" in result[0]:
+                    if result and isinstance(result, list) and "error" in result[0]:
                         st.error(f"AI Error: {result[0]['error']}")
                     else:
                         st.session_state['result_df'] = pd.DataFrame(result)
@@ -90,14 +94,32 @@ if image_data:
             edited_df = st.data_editor(st.session_state['result_df'], num_rows="dynamic", use_container_width=True)
             
             if st.button("💾 Save ALL to Google Sheet"):
-                with st.spinner("Saving rows..."):
+                if not sheet_url:
+                     st.error("Please provide a Google Sheet URL in the sidebar.")
+                else:
+                    # --- FIXED: Added Progress Bar and Sleep to prevent API 429 Errors ---
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
                     success_count = 0
+                    total_rows = len(edited_df)
+                    
                     for index, row in edited_df.iterrows():
+                        status_text.text(f"Saving row {index + 1} of {total_rows}...")
+                        
                         if append_to_sheet(sheet_url, row.to_dict()):
                             success_count += 1
+                        
+                        # Update progress bar
+                        progress_bar.progress((index + 1) / total_rows)
+                        
+                        # 🛑 CRITICAL FIX: Sleep for 2 seconds to avoid "Quota Exceeded" errors
+                        time.sleep(2)
                     
-                    if success_count == len(edited_df):
+                    status_text.empty()
+                    
+                    if success_count == total_rows:
                         st.success(f"✅ Saved {success_count} candidates!")
                         st.balloons()
                     else:
-                        st.warning(f"Saved {success_count} out of {len(edited_df)} candidates.")
+                        st.warning(f"Saved {success_count} out of {total_rows} candidates. Check permissions.")
