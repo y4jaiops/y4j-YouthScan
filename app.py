@@ -1,102 +1,246 @@
 import streamlit as st
-import pandas as pd
-from logic_gemini import parse_document_dynamic
-from logic_sheets import append_to_sheet
-from logic_drive import get_file_from_link
+import io
+import os
+from datetime import date
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google.auth.transport.requests import Request
 
-st.set_page_config(page_title="Y4J Scanner", page_icon="🇮🇳", layout="wide")
-st.title("Y4J YouthScan")
+# --- 0. CRITICAL FIXES ---
+# Allow the app to accept "Full Drive" scope if the user granted it previously
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("Configuration")
-    sheet_url = st.text_input("Paste Google Sheet URL here:")
-# default_cols = "Candidate Name, Phone Number, Disability Type, Education, Village/City, Skills"
-#First Name, Last Name,	ID Type,	ID Number,	Email,	Phone Number,	DateOfBirth,	Gender,	DisabilityType, Qualification,	State
-    default_cols = "First Name, Last Name,	ID Type,	ID Number,	Email,	Phone Number,	DateOfBirth,	Gender,	DisabilityType, Qualification,	State"
-    cols_input = st.text_area("Columns to Extract", value=default_cols, height=150)
-    target_columns = [x.strip() for x in cols_input.split(",") if x.strip()]
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(page_title="Y4J Volunteer Portal", page_icon="🏗️", layout="centered")
+
+# --- 2. CONFIGURATION & CONSTANTS ---
+# Folder where uploads will go (The 2TB Drive Folder)
+FOLDER_ID = "1Vavl3N2vLsJtIY7xdsrjB_fi2LMS1tfU"
+
+# Check for secrets
+if "auth" not in st.secrets:
+    st.error("Missing [auth] section in secrets.toml.")
+    st.stop()
+if "google_auth" not in st.secrets:
+    st.error("Missing [google_auth] section in secrets.toml (needed for Drive uploads).")
+    st.stop()
+
+# --- 3. HELPER FUNCTIONS ---
+
+def get_google_flow():
+    """Creates the OAuth flow for User Login."""
+    auth_secrets = st.secrets["auth"]
     
-    # Display the bot email so users know who to share with
-    if "gcp_service_account" in st.secrets:
-        bot_email = st.secrets["gcp_service_account"]["client_email"]
-        st.info(f"🤖 **Bot Email:**\n`{bot_email}`\n\n(Share Drive files with this email!)")
+    # Construct the client config dictionary
+    client_config = {
+        "web": {
+            "client_id": auth_secrets["client_id"],
+            "client_secret": auth_secrets["client_secret"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [auth_secrets["redirect_uri"]],
+        }
+    }
 
-# --- MAIN AREA ---
-tab1, tab2, tab3 = st.tabs(["📸 Camera", "📂 Upload File", "🔗 Google Drive Link"])
-image_data = None
-mime_type = "image/jpeg" # Default
+    return Flow.from_client_config(
+        client_config,
+        scopes=[
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/drive.file"
+        ],
+        redirect_uri=auth_secrets["redirect_uri"]
+    )
 
-# 1. Camera
-with tab1:
-    cam = st.camera_input("Take a photo")
-    if cam: 
-        image_data = cam.getvalue()
-        mime_type = "image/jpeg"
-
-# 2. Upload
-with tab2:
-    up = st.file_uploader("Upload Image/PDF", type=["jpg", "png", "jpeg", "pdf"])
-    if up: 
-        image_data = up.getvalue()
-        mime_type = up.type
-
-# 3. Google Drive Link
-with tab3:
-    st.markdown("1. Share the file with the **Bot Email** (see sidebar).")
-    st.markdown("2. Paste the link below.")
-    drive_link = st.text_input("Google Drive Link")
-    if drive_link:
-        if st.button("📥 Fetch from Drive"):
-            with st.spinner("Downloading from Drive..."):
-                file_bytes, detected_mime, error = get_file_from_link(drive_link)
-                if error:
-                    st.error(error)
-                else:
-                    image_data = file_bytes
-                    mime_type = detected_mime
-                    st.success(f"Loaded: {detected_mime}")
-
-# --- PROCESSING ---
-if image_data:
-    st.divider()
-    col1, col2 = st.columns([1, 2])
+def get_production_drive_service():
+    """
+    Creates a Drive Service using the 'refresh_token' from secrets.
+    This ensures uploads go to YOUR central 2TB account.
+    """
+    auth = st.secrets["google_auth"]
     
-    with col1:
-        st.markdown(f"**Loaded Document ({mime_type})**")
-        # Only show preview if it's an image (Streamlit can't easily preview PDF bytes yet)
-        if "image" in mime_type:
-            st.image(image_data, use_column_width=True)
-        else:
-            st.info("📄 PDF Document Loaded")
+    creds = Credentials(
+        token=None,
+        refresh_token=auth["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=auth["client_id"],
+        client_secret=auth["client_secret"]
+    )
+    
+    # Refresh if expired
+    if not creds.valid:
+        creds.refresh(Request())
         
-        if st.button("🚀 Analyze with Gemini", type="primary"):
-            if not sheet_url:
-                st.warning("Please enter a Google Sheet URL first.")
-            else:
-                with st.spinner("Gemini is analyzing..."):
-                    # Pass the dynamic mime type!
-                    result = parse_document_dynamic(image_data, target_columns, mime_type)
-                    
-                    if result and "error" in result[0]:
-                        st.error(f"AI Error: {result[0]['error']}")
-                    else:
-                        st.session_state['result_df'] = pd.DataFrame(result)
+    return build('drive', 'v3', credentials=creds)
 
-    with col2:
-        if 'result_df' in st.session_state:
-            st.subheader("Verify Data")
-            edited_df = st.data_editor(st.session_state['result_df'], num_rows="dynamic", use_container_width=True)
+def upload_to_drive(file_name, file_content, mime_type):
+    """Uploads a file to the configured FOLDER_ID."""
+    try:
+        service = get_production_drive_service()
+        
+        file_metadata = {
+            'name': file_name,
+            'parents': [FOLDER_ID]
+        }
+        
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_content), 
+            mimetype=mime_type, 
+            resumable=True
+        )
+        
+        file = service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id'
+        ).execute()
+        
+        return file.get('id')
+        
+    except Exception as e:
+        st.error(f"Upload failed: {e}")
+        return None
+
+# --- 4. AUTHENTICATION LOGIC (THE GATEKEEPER) ---
+
+# Check if we are already logged in
+if "credentials" not in st.session_state:
+    
+    # A. Handle the Return Trip (Google sending user back)
+    if "code" in st.query_params:
+        try:
+            # Get the code from the URL
+            code = st.query_params["code"]
             
-            if st.button("💾 Save ALL to Google Sheet"):
-                with st.spinner("Saving rows..."):
-                    success_count = 0
-                    for index, row in edited_df.iterrows():
-                        if append_to_sheet(sheet_url, row.to_dict()):
-                            success_count += 1
-                    
-                    if success_count == len(edited_df):
-                        st.success(f"✅ Saved {success_count} candidates!")
-                        st.balloons()
-                    else:
-                        st.warning(f"Saved {success_count} out of {len(edited_df)} candidates.")
+            # Exchange the code for a token
+            flow = get_google_flow()
+            flow.fetch_token(code=code)
+            
+            # Save login state
+            st.session_state["credentials"] = flow.credentials
+            
+            # Clear URL query params to prevent reload loops
+            st.query_params.clear()
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+            st.stop()
+
+    # B. Show Login Button (If no code and no credentials)
+    else:
+        st.title("🏗️ Y4J Volunteer Portal")
+        st.info("Please log in to access the system.")
+        
+        flow = get_google_flow()
+        
+        # Disable PKCE to prevent invalid_grant errors
+        auth_url, _ = flow.authorization_url(
+            prompt='consent',
+            access_type='offline',
+            include_granted_scopes='true',
+            pkce=False
+        )
+        
+        st.link_button("Log in with Google", auth_url)
+        st.stop()
+
+# --- 5. MAIN APP (LOGGED IN ONLY) ---
+
+# If code reaches here, user is logged in
+creds = st.session_state["credentials"]
+
+# --- FETCH USER INFO ---
+try:
+    # Build the OAuth2 service to get user details
+    user_service = build('oauth2', 'v2', credentials=creds)
+    user_info = user_service.userinfo().get().execute()
+    
+    user_email = user_info.get('email')
+    user_id = user_info.get('id')
+    user_name = user_info.get('name', 'Volunteer')
+    user_pic = user_info.get('picture')
+    
+    # Display in Sidebar
+    st.sidebar.success(f"✅ Logged In")
+    if user_pic:
+        st.sidebar.image(user_pic, width=50)
+    st.sidebar.write(f"**{user_name}**")
+    st.sidebar.caption(f"{user_email}")
+    
+except Exception as e:
+    st.sidebar.warning("Logged in, but couldn't fetch profile info.")
+    # Fallback values if API fails
+    user_email = "Unknown User"
+    user_id = "N/A"
+    user_name = "Volunteer"
+
+# Logout Button
+if st.sidebar.button("Logout"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+# --- MAIN FORM UI ---
+st.title("🏗️ Y4J Candidate Info Builder")
+st.write(f"Welcome, **{user_name}**!")
+
+with st.form("entry_form", clear_on_submit=True):
+    st.subheader("New Contribution")
+    
+    # 1. FILE ENTRY DATA (Category Removed)
+    info_title = st.text_input("Candidate/Info Title")
+    entry_date = st.date_input("Document Date", date.today())
+    details = st.text_area("Details/Description")
+    
+    st.divider()
+    
+    # 2. FILE BROWSE FEATURE
+    uploaded_file = st.file_uploader("Upload PDF, Image, or Doc", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "txt"])
+    
+    # Button is inside the form
+    submit = st.form_submit_button("🚀 Upload to Production Drive", use_container_width=True)
+
+# --- 6. SUBMISSION LOGIC ---
+if submit:
+    if not info_title:
+        st.error("Error: Please provide a title.")
+    else:
+        with st.spinner("Pushing to 2 TB Storage..."):
+            success = True
+            
+            # A. Upload the Text Details
+            # Removed category from filename. Just using Date + Title.
+            text_filename = f"{entry_date}_{info_title}_notes.txt"
+            
+            full_content = (
+                f"TITLE: {info_title}\n"
+                f"DATE: {entry_date}\n"
+                f"AUTHOR: {user_email} (ID: {user_id})\n"
+                f"----------------------------------------\n"
+                f"{details}"
+            )
+            
+            res_text = upload_to_drive(text_filename, full_content.encode('utf-8'), 'text/plain')
+            if not res_text: success = False
+
+            # B. UPLOAD LOGIC
+            if uploaded_file:
+                # Use the user's title for the file name as well (plus extension)
+                # We keep the email prefix to avoid overwrites if two users pick the same title
+                file_ext = os.path.splitext(uploaded_file.name)[1]
+                file_name = f"{entry_date}_{info_title}_{user_email}{file_ext}"
+                
+                res_file = upload_to_drive(file_name, uploaded_file.getvalue(), uploaded_file.type)
+                
+                if not res_file: 
+                    success = False
+                    st.error("File upload failed.")
+                else:
+                    st.toast(f"File uploaded: {file_name}")
+
+            if success:
+                st.success(f"Successfully uploaded '{info_title}' records!")
+                st.balloons()
