@@ -22,12 +22,10 @@ with st.sidebar:
     # 1. Sheet Name Input
     sheet_name = st.text_input("Spreadsheet Name", value="Youth4Jobs_Candidates")
     
-    # 2. Folder Configuration (Hidden by default to keep UI clean)
+    # 2. Folder Configuration
     with st.expander("📂 Change Drive Folder"):
-        # Try to get default from secrets, else empty
-        default_folder = ""
-        if "general_settings" in st.secrets:
-            default_folder = st.secrets["general_settings"].get("default_folder_id", "")
+        # --- FIXED: Hardcoded Default Folder ID ---
+        default_folder = "1Vavl3N2vLsJtIY7xdsrjB_fi2LMS1tfU"
             
         folder_id = st.text_input("Target Drive Folder ID", value=default_folder, 
                                   help="Copy the ID from the end of your Drive Folder URL")
@@ -129,4 +127,6 @@ if active_image_data:
                                 st.balloons()
                                 st.markdown(f"[Open Spreadsheet]({sheet_url})")
                         else:
-                            st.error("Could not find or create the spreadsheet. Check permissions.")
+                            # Specific error help based on your recent issues
+                            st.error("Could not find or create the spreadsheet.")
+                            st.warning("💡 Tip: If you get a 'Quota Exceeded' error, try manually creating the sheet in Drive first, sharing it with the Bot, and then using that name here.")
