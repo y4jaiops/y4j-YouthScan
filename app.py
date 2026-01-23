@@ -9,47 +9,64 @@ from logic_sheets import _get_gspread_client # Import auth helper
 st.set_page_config(page_title="Y4J YouthScan App", page_icon="🇮🇳", layout="wide")
 st.title("🇮🇳 Youth4Jobs Smart Scanner")
 
-# --- TEMPORARY ADMIN TOOL ---
-# This button will fix your [403] Quota Error by deleting the Bot's hidden files.
+# --- ADMIN ZONE (DEEP CLEAN VERSION) ---
 with st.sidebar:
     st.divider()
     st.header("⚠️ Admin Zone")
-    if st.button("🧹 Wipe Bot Storage (Fix Quota)"):
+    if st.button("☢️ NUCLEAR WIPE (Fix Quota)"):
         status = st.empty()
-        status.info("Connecting to Bot's Drive...")
+        status.info("Scanning Bot's entire Drive (All file types)...")
         
         try:
-            client = _get_gspread_client()
-            if client:
-                # List all spreadsheets owned by the bot
-                files = client.list_spreadsheet_files()
+            # 1. Setup raw Drive API (Standard gspread doesn't see non-sheets)
+            from google.oauth2.service_account import Credentials
+            from googleapiclient.discovery import build
+            
+            if "gcp_service_account" in st.secrets:
+                creds_dict = dict(st.secrets["gcp_service_account"])
+                # We need drive scope to delete generic files
+                SCOPES = ["https://www.googleapis.com/auth/drive"]
+                creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+                service = build('drive', 'v3', credentials=creds)
+                
+                # 2. Search for ANY file owned by 'me' (the bot)
+                # q parameter filters for files owned by bot and not already trashed
+                results = service.files().list(
+                    q="'me' in owners and trashed = false",
+                    fields="files(id, name, mimeType)",
+                    pageSize=1000  # Grab a big chunk
+                ).execute()
+                
+                files = results.get('files', [])
                 
                 if not files:
-                    status.success("✅ Storage is already clean! No files found.")
+                    status.success("✅ Drive is 100% empty! No files found.")
                 else:
                     total = len(files)
-                    status.warning(f"Found {total} hidden files. Deleting...")
+                    status.warning(f"⚠️ Found {total} files (PDFs, Images, Sheets, etc). Deleting...")
                     
                     progress = st.progress(0)
                     deleted_count = 0
                     
                     for i, f in enumerate(files):
                         try:
-                            client.del_spreadsheet(f['id'])
+                            service.files().delete(fileId=f['id']).execute()
                             deleted_count += 1
-                        except:
-                            pass
+                        except Exception as delete_err:
+                            print(f"Failed to delete {f['name']}: {delete_err}")
+                        
+                        # Update progress bar
                         progress.progress((i + 1) / total)
                     
-                    status.success(f"🎉 Success! Deleted {deleted_count} files. Quota freed.")
-                    time.sleep(3)
+                    status.success(f"🎉 Wiped {deleted_count} items! Storage is now empty.")
+                    time.sleep(2)
                     st.rerun()
             else:
-                status.error("Auth failed.")
+                status.error("Secrets missing.")
+                
         except Exception as e:
-            status.error(f"Error: {e}")
+            status.error(f"Deep Clean Failed: {e}")
     st.divider()
-# ---------------------------
 
 # --- SESSION STATE ---
 if 'drive_data' not in st.session_state: st.session_state['drive_data'] = None
