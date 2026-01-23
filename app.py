@@ -1,11 +1,55 @@
 import streamlit as st
 import pandas as pd
+import time
 from logic_gemini import parse_document_dynamic
 from logic_sheets import append_batch_to_sheet, get_or_create_spreadsheet
 from logic_drive import get_file_from_link
+from logic_sheets import _get_gspread_client # Import auth helper
 
 st.set_page_config(page_title="Y4J YouthScan App", page_icon="🇮🇳", layout="wide")
 st.title("🇮🇳 Youth4Jobs Smart Scanner")
+
+# --- TEMPORARY ADMIN TOOL ---
+# This button will fix your [403] Quota Error by deleting the Bot's hidden files.
+with st.sidebar:
+    st.divider()
+    st.header("⚠️ Admin Zone")
+    if st.button("🧹 Wipe Bot Storage (Fix Quota)"):
+        status = st.empty()
+        status.info("Connecting to Bot's Drive...")
+        
+        try:
+            client = _get_gspread_client()
+            if client:
+                # List all spreadsheets owned by the bot
+                files = client.list_spreadsheet_files()
+                
+                if not files:
+                    status.success("✅ Storage is already clean! No files found.")
+                else:
+                    total = len(files)
+                    status.warning(f"Found {total} hidden files. Deleting...")
+                    
+                    progress = st.progress(0)
+                    deleted_count = 0
+                    
+                    for i, f in enumerate(files):
+                        try:
+                            client.del_spreadsheet(f['id'])
+                            deleted_count += 1
+                        except:
+                            pass
+                        progress.progress((i + 1) / total)
+                    
+                    status.success(f"🎉 Success! Deleted {deleted_count} files. Quota freed.")
+                    time.sleep(3)
+                    st.rerun()
+            else:
+                status.error("Auth failed.")
+        except Exception as e:
+            status.error(f"Error: {e}")
+    st.divider()
+# ---------------------------
 
 # --- SESSION STATE ---
 if 'drive_data' not in st.session_state: st.session_state['drive_data'] = None
@@ -19,23 +63,18 @@ def clear_drive_data():
 with st.sidebar:
     st.header("1. Output Settings")
     
-    # 1. Sheet Name Input
     sheet_name = st.text_input("Spreadsheet Name", value="Youth4Jobs_Candidates")
     
-    # 2. Folder Configuration
     with st.expander("📂 Change Drive Folder"):
-        # --- FIXED: Hardcoded Default Folder ID ---
+        # Hardcoded Default Folder ID
         default_folder = "1Vavl3N2vLsJtIY7xdsrjB_fi2LMS1tfU"
-            
-        folder_id = st.text_input("Target Drive Folder ID", value=default_folder, 
-                                  help="Copy the ID from the end of your Drive Folder URL")
+        folder_id = st.text_input("Target Drive Folder ID", value=default_folder)
 
     st.header("2. Data Extraction")
     default_cols = "First Name, Last Name, ID Type, ID Number, Email, PhoneNumber, DateOfBirth, Gender, DisabilityType, Qualification, State"
     cols_input = st.text_area("Columns to Extract", value=default_cols, height=100)
     target_columns = [x.strip() for x in cols_input.split(",") if x.strip()]
     
-    # Bot Email Info
     if "gcp_service_account" in st.secrets:
         bot_email = st.secrets["gcp_service_account"]["client_email"]
         st.info(f"🤖 **Bot Email:**\n`{bot_email}`\n\n(Share Drive folders/files with this email!)")
@@ -110,23 +149,21 @@ if active_image_data:
             st.subheader("Verify Data")
             edited_df = st.data_editor(st.session_state['result_df'], num_rows="dynamic", use_container_width=True)
             
-            # --- SAVE BUTTON ---
             if st.button("💾 Save to Google Sheet"):
                 if not sheet_name:
                     st.error("Please enter a Spreadsheet Name in the sidebar.")
                 else:
                     with st.spinner(f"Connecting to '{sheet_name}'..."):
-                        # 1. Get or Create the Sheet URL
+                        # Get or Create Sheet
                         sheet_url = get_or_create_spreadsheet(sheet_name, folder_id if folder_id else None)
                         
                         if sheet_url:
-                            # 2. Save Data
+                            # Save Data
                             data_to_save = edited_df.to_dict('records')
                             if append_batch_to_sheet(sheet_url, data_to_save):
                                 st.success(f"✅ Saved to **{sheet_name}**!")
                                 st.balloons()
                                 st.markdown(f"[Open Spreadsheet]({sheet_url})")
                         else:
-                            # Specific error help based on your recent issues
                             st.error("Could not find or create the spreadsheet.")
-                            st.warning("💡 Tip: If you get a 'Quota Exceeded' error, try manually creating the sheet in Drive first, sharing it with the Bot, and then using that name here.")
+                            st.warning("If you see Quota Exceeded, use the Admin Zone button above!")
